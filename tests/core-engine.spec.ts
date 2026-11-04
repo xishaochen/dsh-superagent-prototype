@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { Engine, MemoryRepositories, UserError, followupOwners, key, runningAssignment, ticketOutcome, ticketStage,
+import { Engine, MemoryRepositories, QUEUED_NOTICE, UserError, followupOwners, key, runningAssignment, ticketOutcome, ticketStage,
   waitsForPerson } from '../src/core/index.ts'
 import type { Assessor, Assignment, Candidate, EngineOptions, Executor, OutboundMessage, Outcome, Policy, Ticket, Trigger } from '../src/core/index.ts'
 
@@ -79,6 +79,29 @@ describe('intake', () => {
     expect(h.engine.receive(trigger('2', { meta: { blocked: true } }))).toBe('filtered')
     expect(h.repo.triggers.disposition('2')?.filtered).toEqual({ code: 'chat not allowed' })
     expect(h.repo.threads.get('chat:t1')?.pending).toEqual(['1'])
+  })
+  it('acknowledges a person\'s message that reaches a live ticket with no worker turn coming, so a queued wait is not silence', () => {
+    const h = harness()
+    const ticket = h.repo.tickets.get(accepted(h).ticketId!)!
+    // The worker reports its turn is over with a question, so the ticket idles until a person answers.
+    h.engine.report(ticket.id, { state: 'waiting', summary: '等确认' })
+    h.outbox.length = 0
+    const follow = trigger('2')
+    h.engine.receive(follow); h.settle()
+    expect(h.outbox).toEqual([{ id: key('queued-notice', follow.id, ticket.id), channel: follow.channel, text: QUEUED_NOTICE,
+      kind: 'notice', ticketId: ticket.id }])
+    // Neither a repeated delivery nor a second pass of the same message queues it twice.
+    h.engine.receive(trigger('2')); h.settle()
+    expect(h.outbox).toHaveLength(1)
+  })
+  it('does not acknowledge a message that reaches a ticket whose worker is in a turn, where the worker answers it directly', () => {
+    const h = harness()
+    const ticket = h.repo.tickets.get(accepted(h).ticketId!)!
+    h.outbox.length = 0
+    h.engine.receive(trigger('2')); h.settle()
+    expect(h.outbox).toEqual([])
+    // The worker's running assignment received it instead of the person waiting for a notice.
+    expect(h.delivered).toContainEqual([ticket.id, key('input', ticket.id, 'trigger', '2')])
   })
   it('records correlation for a trigger on several threads and evaluates only on the primary one', () => {
     const h = harness()
